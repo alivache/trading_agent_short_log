@@ -1,9 +1,13 @@
 # scripts/research.py
-# Citeste date de piata de la Alpaca: bars, news, account, positions
+# Date de pret de la yfinance (gratuit), cont/pozitii de la Alpaca
+# Optimizat: descarca toate simbolurile odata (bulk), nu unul cate unul
 import os
 import requests
 import json
 import sys
+import time
+import yfinance as yf
+import pandas as pd
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -18,30 +22,93 @@ HEADERS = {
 }
 
 
-def get_bars(symbol, timeframe="1Day", limit=60):
-    """Descarca bare istorice de pret pentru un simbol."""
-    url = f"https://data.alpaca.markets/v2/stocks/{symbol}/bars"
-    params = {"timeframe": timeframe, "limit": limit, "adjustment": "raw"}
-    r = requests.get(url, headers=HEADERS, params=params)
-    return r.json()
+def get_bars(symbol, limit=60):
+    """Bare istorice pentru UN singur simbol (folosit la testare manuala)."""
+    try:
+        df = yf.download(symbol, period=f"{limit + 40}d", interval="1d",
+                         progress=False, auto_adjust=False)
+        if df.empty:
+            return {"bars": []}
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        df = df.tail(limit)
+        bars = []
+        for idx, row in df.iterrows():
+            try:
+                bars.append({
+                    "t": idx.strftime("%Y-%m-%d"),
+                    "o": round(float(row["Open"]), 2),
+                    "h": round(float(row["High"]), 2),
+                    "l": round(float(row["Low"]), 2),
+                    "c": round(float(row["Close"]), 2),
+                    "v": int(row["Volume"]) if not pd.isna(row["Volume"]) else 0
+                })
+            except Exception:
+                continue
+        return {"bars": bars}
+    except Exception as e:
+        return {"bars": [], "eroare": str(e)}
+
+
+def analizeaza_toate(simboluri):
+    """Descarca TOATE simbolurile odata si calculeaza MA20/MA50/trend pentru fiecare.
+    Mult mai rapid si evita rate-limit fata de cereri individuale."""
+    rezultat = {}
+    try:
+        df = yf.download(simboluri, period="100d", interval="1d",
+                         group_by="ticker", progress=False, threads=True,
+                         auto_adjust=False)
+    except Exception as e:
+        # Fallback: returneaza erori pentru toate
+        for s in simboluri:
+            rezultat[s] = {"symbol": s, "eroare": f"download esuat: {e}"}
+        return rezultat
+
+    for simbol in simboluri:
+        try:
+            if len(simboluri) > 1:
+                d = df[simbol].dropna()
+            else:
+                d = df.dropna()
+            if len(d) < 50:
+                rezultat[simbol] = {"symbol": simbol, "eroare": "date insuficiente"}
+                continue
+
+            inchideri = d["Close"].tolist()
+            pret = round(float(inchideri[-1]), 2)
+            ma20 = round(sum(inchideri[-20:]) / 20, 2)
+            ma50 = round(sum(inchideri[-50:]) / 50, 2)
+
+            if pret > ma20 > ma50:
+                trend = "bullish"
+            elif pret < ma20 < ma50:
+                trend = "bearish"
+            else:
+                trend = "lateral"
+
+            rezultat[simbol] = {
+                "symbol": simbol, "pret": pret,
+                "ma20": ma20, "ma50": ma50, "trend": trend
+            }
+        except Exception as e:
+            rezultat[simbol] = {"symbol": simbol, "eroare": str(e)}
+
+    return rezultat
 
 
 def get_account():
-    """Starea curenta a portofoliului."""
     url = f"{BASE_URL}/v2/account"
     r = requests.get(url, headers=HEADERS)
     return r.json()
 
 
 def get_positions():
-    """Toate pozitiile deschise."""
     url = f"{BASE_URL}/v2/positions"
     r = requests.get(url, headers=HEADERS)
     return r.json()
 
 
 def get_news(symbol):
-    """Stiri recente pentru un simbol."""
     url = "https://data.alpaca.markets/v1beta1/news"
     params = {"symbols": symbol, "limit": 5, "sort": "desc"}
     r = requests.get(url, headers=HEADERS, params=params)
@@ -49,7 +116,6 @@ def get_news(symbol):
 
 
 def calculeaza_ma(bars, perioada):
-    """Calculeaza media mobila simpla din bare."""
     inchideri = [b["c"] for b in bars.get("bars", [])]
     if len(inchideri) < perioada:
         return None
@@ -57,16 +123,17 @@ def calculeaza_ma(bars, perioada):
 
 
 def analiza_simbol(symbol):
-    """Analiza completa: pret, MA20, MA50, trend, stiri."""
+    """Analiza pentru UN simbol (testare manuala)."""
     bars = get_bars(symbol, limit=60)
     barr = bars.get("bars", [])
     if not barr:
-        return {"symbol": symbol, "eroare": "fara date"}
-
+        rez = {"symbol": symbol, "eroare": "fara date"}
+        if "eroare" in bars:
+            rez["detalii"] = bars["eroare"]
+        return rez
     pret = barr[-1]["c"]
     ma20 = calculeaza_ma(bars, 20)
     ma50 = calculeaza_ma(bars, 50)
-
     trend = "necunoscut"
     if ma20 and ma50:
         if pret > ma20 > ma50:
@@ -75,10 +142,8 @@ def analiza_simbol(symbol):
             trend = "bearish"
         else:
             trend = "lateral"
-
     return {
-        "symbol": symbol,
-        "pret": round(pret, 2),
+        "symbol": symbol, "pret": round(pret, 2),
         "ma20": round(ma20, 2) if ma20 else None,
         "ma50": round(ma50, 2) if ma50 else None,
         "trend": trend
