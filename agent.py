@@ -109,6 +109,22 @@ def salveaza_istoric(valoare, cash, nr_pozitii):
             w.writerow(randuri[z])
 
 
+def ia_stiri(simbol, maxim=2):
+    """Ia titluri de stiri recente pentru un simbol (yfinance, gratuit)."""
+    try:
+        import yfinance as yf
+        ticker = yf.Ticker(simbol)
+        news = ticker.news
+        titluri = []
+        for n in news[:maxim]:
+            t = n.get("content", {}).get("title") or n.get("title", "")
+            if t:
+                titluri.append(t)
+        return titluri
+    except Exception:
+        return []
+
+
 def putere_semnal(a):
     try:
         return (a["pret"] - a["ma50"]) / a["ma50"] * 100
@@ -276,14 +292,24 @@ def ruleaza():
             trade_uri.append(f"{a['symbol']} ({a['sector']}) BUY {qty} @ ${limit}")
             print(f"  ✅ {a['symbol']} ({a['sector']}) BUY {qty} @ ${limit} | +{a['putere']:.1f}% peste MA50")
 
+    # Nivel 1: ia stiri pentru selectia finala (pune in jurnal)
+    stiri_selectie = {}
+    if selectii:
+        print("\n📰 Iau stiri pentru selectie...")
+        for a in selectii:
+            titluri = ia_stiri(a["symbol"])
+            stiri_selectie[a["symbol"]] = titluri
+            if titluri:
+                print(f"  {a['symbol']}: {titluri[0][:60]}")
+
     jurnal = genereaza_jurnal(zi, cash, valoare_totala, pozitii, valide,
                               bullish, bearish, trade_uri, inchideri,
-                              piata_in_scadere, piata_deschisa, selectii, reguli)
+                              piata_in_scadere, piata_deschisa, selectii, reguli, stiri_selectie)
     scrie_jurnal(jurnal)
 
 
 def genereaza_jurnal(zi, cash, valoare, pozitii, valide, bullish, bearish,
-                     trade_uri, inchideri, scadere, piata_deschisa, selectii, reguli):
+                     trade_uri, inchideri, scadere, piata_deschisa, selectii, reguli, stiri_selectie=None):
     linii = [f"# Jurnal Trading — {zi}\n"]
     linii.append(f"*Strategie: {reguli['strategy_name']}*\n")
     linii.append("## Stare Portofoliu")
@@ -316,6 +342,15 @@ def genereaza_jurnal(zi, cash, valoare, pozitii, valide, bullish, bearish,
         linii.append("## Selectie Diversificata (max 2/sector)")
         for a in selectii:
             linii.append(f"- {a['symbol']} ({a.get('sector','?')}) — +{a.get('putere',0):.1f}% peste MA50")
+        linii.append("")
+
+    if stiri_selectie and any(stiri_selectie.values()):
+        linii.append("## Stiri Relevante (selectie)")
+        for simbol, titluri in stiri_selectie.items():
+            if titluri:
+                linii.append(f"**{simbol}:**")
+                for t in titluri:
+                    linii.append(f"- {t}")
         linii.append("")
 
     if scadere:
