@@ -90,6 +90,25 @@ def salveaza_trade(simbol, side, qty, pret, stop_price):
                     SECTOARE.get(simbol, "altul")])
 
 
+def salveaza_istoric(valoare, cash, nr_pozitii):
+    """Salveaza valoarea portofoliului zilnic pentru grafic evolutie."""
+    import csv as _csv
+    fisier = os.path.join(FOLDER, "istoric_portofoliu.csv")
+    zi = datetime.now().strftime("%Y-%m-%d")
+    randuri = {}
+    if os.path.exists(fisier):
+        with open(fisier, encoding="utf-8") as f:
+            for row in _csv.DictReader(f):
+                randuri[row["zi"]] = row
+    randuri[zi] = {"zi": zi, "valoare": round(valoare, 2),
+                   "cash": round(cash, 2), "pozitii": nr_pozitii}
+    with open(fisier, "w", newline="", encoding="utf-8") as f:
+        w = _csv.DictWriter(f, fieldnames=["zi", "valoare", "cash", "pozitii"])
+        w.writeheader()
+        for z in sorted(randuri.keys()):
+            w.writerow(randuri[z])
+
+
 def putere_semnal(a):
     try:
         return (a["pret"] - a["ma50"]) / a["ma50"] * 100
@@ -149,6 +168,7 @@ def ruleaza():
 
     print(f"Cash: ${cash:.2f} | Portofoliu: ${valoare_totala:.2f}")
     print(f"Pozitii deschise: {len(pozitii)} | Piata: {'DESCHISA' if piata_deschisa else 'INCHISA'}")
+    salveaza_istoric(valoare_totala, cash, len(pozitii))
 
     wl = incarca_watchlist()
     simboluri = [item["symbol"] for item in wl["watchlist"]]
@@ -187,19 +207,35 @@ def ruleaza():
 
     # Stop loss pe pozitii existente
     inchideri = []
+    pt_cfg = r_exit.get("profit_taking", {"activ": False})
     for p in pozitii:
         try:
             pl_pct = float(p.get("unrealized_plpc", 0)) * 100
-            if pl_pct <= -stop_loss_pct:
+            stop_efectiv = -stop_loss_pct
+            prag_atins = None
+            if pt_cfg.get("activ"):
+                for prag in pt_cfg["praguri"]:
+                    if pl_pct >= prag["profit_pct"]:
+                        if prag["muta_stop_la_pct"] > stop_efectiv:
+                            stop_efectiv = prag["muta_stop_la_pct"]
+                            prag_atins = prag["profit_pct"]
+            iesire = pl_pct <= stop_efectiv
+            if iesire:
                 if piata_deschisa:
                     pret = float(p["current_price"])
                     limit = round(pret * (1 - limit_marja), 2)
                     trade.place_order(p["symbol"], p["qty"], "sell", limit)
                     salveaza_trade(p["symbol"], "SELL", p["qty"], pret, 0)
-                    inchideri.append(f"{p['symbol']} (SL {pl_pct:.1f}%)")
-                    print(f"  STOP LOSS {p['symbol']}: {pl_pct:.1f}%")
+                    if prag_atins is not None:
+                        motiv = f"PROFIT-TAKING (stop urcat la {stop_efectiv:.0f}% dupa +{prag_atins:.0f}%)"
+                    else:
+                        motiv = f"STOP LOSS ({pl_pct:.1f}%)"
+                    inchideri.append(f"{p['symbol']} — {motiv}")
+                    print(f"  🔴 INCHIS {p['symbol']}: {motiv} | P&L acum {pl_pct:.1f}%")
                 else:
-                    print(f"  {p['symbol']} sub SL ({pl_pct:.1f}%) — astept deschiderea")
+                    print(f"  {p['symbol']} sub stop efectiv ({stop_efectiv:.0f}%) — astept deschiderea")
+            elif pt_cfg.get("activ") and prag_atins is not None:
+                print(f"  🛡️  {p['symbol']} +{pl_pct:.1f}% — stop protejat la {stop_efectiv:.0f}% (prag +{prag_atins:.0f}% atins)")
         except Exception as e:
             print(f"  Eroare verificare {p.get('symbol')}: {e}")
 

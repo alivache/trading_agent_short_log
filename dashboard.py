@@ -3,6 +3,8 @@ import os
 import sys
 import glob
 import re
+import csv
+import json
 import requests
 from datetime import datetime
 from dotenv import load_dotenv
@@ -20,6 +22,26 @@ HEADERS = {"APCA-API-KEY-ID": ALPACA_KEY, "APCA-API-SECRET-KEY": ALPACA_SECRET}
 app = Flask(__name__)
 FOLDER = "/home/liviu_anton/trading-agent-v2"
 JOURNAL_DIR = os.path.join(FOLDER, "journal")
+RULES_FILE = os.path.join(FOLDER, "rules.json")
+ISTORIC_FILE = os.path.join(FOLDER, "istoric_portofoliu.csv")
+TRADES_CSV = os.path.join(FOLDER, "trades.csv")
+
+SECTOARE = {
+    "AAPL": "tech", "MSFT": "tech", "GOOGL": "tech", "AMZN": "tech", "META": "tech",
+    "NVDA": "semi", "TSLA": "auto", "AVGO": "semi", "ORCL": "software", "CRM": "software",
+    "AMD": "semi", "INTC": "semi", "QCOM": "semi", "TXN": "semi", "MU": "semi",
+    "AMAT": "semi", "ADI": "semi", "LRCX": "semi", "KLAC": "semi", "MRVL": "semi",
+    "ADBE": "software", "NOW": "software", "INTU": "software", "PANW": "software",
+    "SNOW": "software", "CRWD": "software", "DDOG": "software", "NET": "software",
+    "ZS": "software", "PLTR": "software", "NFLX": "media", "DIS": "media",
+    "JPM": "financiar", "BAC": "financiar", "WFC": "financiar", "GS": "financiar",
+    "MS": "financiar", "C": "financiar", "V": "financiar", "MA": "financiar",
+    "MRNA": "biotech", "BNTX": "biotech", "VRTX": "biotech", "REGN": "biotech",
+    "GILD": "biotech", "BIIB": "biotech", "COIN": "crypto", "MARA": "crypto",
+    "RIOT": "crypto", "SOFI": "fintech", "AFRM": "fintech", "HOOD": "fintech",
+    "GE": "industrial", "CAT": "industrial", "RTX": "industrial",
+    "SPY": "etf", "QQQ": "etf", "IWM": "etf", "DIA": "etf",
+}
 
 
 def get_account():
@@ -44,6 +66,38 @@ def get_clock():
         return {"is_open": False}
 
 
+def incarca_reguli():
+    try:
+        with open(RULES_FILE) as f:
+            return json.load(f)
+    except:
+        return {}
+
+
+def stop_efectiv_pct(pl_pct, stop_loss_pct, pt_cfg):
+    stop = -stop_loss_pct
+    prag = None
+    if pt_cfg.get("activ"):
+        for p in pt_cfg.get("praguri", []):
+            if pl_pct >= p["profit_pct"] and p["muta_stop_la_pct"] > stop:
+                stop = p["muta_stop_la_pct"]
+                prag = p["profit_pct"]
+    return stop, prag
+
+
+def incarca_istoric():
+    if not os.path.exists(ISTORIC_FILE):
+        return []
+    randuri = []
+    with open(ISTORIC_FILE, encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            try:
+                randuri.append({"zi": row["zi"], "valoare": float(row["valoare"])})
+            except:
+                pass
+    return randuri
+
+
 def lista_jurnale():
     fisiere = sorted(glob.glob(os.path.join(JOURNAL_DIR, "*.md")), reverse=True)
     return [os.path.basename(f).replace(".md", "") for f in fisiere]
@@ -66,18 +120,6 @@ def parse_rezumat(continut):
     return None
 
 
-def parse_candidati(continut):
-    if not continut:
-        return []
-    rezultat = []
-    randuri = re.findall(
-        r"\| (\w+) \| (\w+) \| \$([\d.]+) \| \$([\d.]+) \| \+([\d.]+)% \|", continut)
-    for simbol, sector, pret, ma50, putere in randuri:
-        rezultat.append({"symbol": simbol, "sector": sector,
-                         "pret": float(pret), "ma50": float(ma50), "putere": float(putere)})
-    return rezultat
-
-
 def parse_selectie(continut):
     if not continut:
         return []
@@ -90,6 +132,24 @@ def parse_selectie(continut):
         if m:
             selectii.append({"symbol": m.group(1), "sector": m.group(2), "putere": float(m.group(3))})
     return selectii
+
+
+def sparkline_points(istoric, w=600, h=120):
+    if len(istoric) < 2:
+        return None
+    valori = [x["valoare"] for x in istoric]
+    vmin, vmax = min(valori), max(valori)
+    span = vmax - vmin if vmax > vmin else 1
+    pad = 10
+    n = len(valori)
+    pts = []
+    for i, v in enumerate(valori):
+        x = pad + i * (w - 2 * pad) / (n - 1)
+        y = h - pad - (v - vmin) / span * (h - 2 * pad)
+        pts.append(f"{x:.1f},{y:.1f}")
+    return {"points": " ".join(pts), "vmin": vmin, "vmax": vmax,
+            "prima": valori[0], "ultima": valori[-1], "w": w, "h": h,
+            "zile": [x["zi"][5:] for x in istoric]}
 
 
 HTML = """
@@ -121,29 +181,29 @@ HTML = """
         tr:last-child td { border-bottom: none; }
         .badge { display: inline-block; padding: 3px 10px; border-radius: 4px;
             font-size: 11px; font-weight: bold; background: #21262d; color: #8b949e; }
-        .badge-sel { background: #1a3a1f; color: #3fb950; }
-        .bar-bg { background: #21262d; border-radius: 4px; height: 8px; width: 100px; display: inline-block; vertical-align: middle; }
-        .bar-fill { background: #3fb950; height: 8px; border-radius: 4px; }
+        .badge-protejat { background: #1a3a1f; color: #3fb950; }
+        .badge-risc { background: #3a2a1a; color: #d29922; }
         .status-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; }
         .status-online { background: #3fb950; } .status-offline { background: #f85149; }
         .sentiment { display: flex; gap: 4px; height: 30px; border-radius: 6px; overflow: hidden; margin-bottom: 8px; }
         .sent-bull { background: #3fb950; } .sent-bear { background: #f85149; } .sent-lat { background: #30363d; }
-        .hist-row { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
-        .hist-label { width: 70px; font-size: 12px; color: #8b949e; font-family: monospace; }
-        .hist-bar { height: 22px; border-radius: 4px; min-width: 2px; }
-        .hist-count { font-size: 12px; color: #c9d1d9; }
+        .sector-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+        .sector-label { width: 90px; font-size: 13px; color: #c9d1d9; }
+        .sector-bar { height: 24px; border-radius: 4px; background: #58a6ff; min-width: 4px;
+            display: flex; align-items: center; padding-left: 8px; font-size: 12px; font-weight: bold; color: #0f1419; }
         .timestamp { text-align: right; color: #8b949e; font-size: 12px; margin-top: 20px; }
         .jurnal-box { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 20px; }
         .jurnal-select { background: #21262d; color: #e6edf3; border: 1px solid #30363d;
             border-radius: 6px; padding: 8px 12px; font-size: 14px; margin-bottom: 15px; }
         .jurnal-content { white-space: pre-wrap; font-family: 'Courier New', monospace;
             font-size: 13px; line-height: 1.6; color: #c9d1d9; }
+        .chart-box { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 20px; margin-bottom: 25px; }
     </style>
 </head>
 <body>
     <div class="container">
         <h1>🤖 Trading Agent V2</h1>
-        <div class="subtitle">MA20/MA50 · putere semnal · diversificare · R-multiple · LONG only</div>
+        <div class="subtitle">MA20/MA50 · putere semnal · diversificare · R-multiple · profit-taking</div>
 
         <div class="grid">
             <div class="card"><h3>Cash</h3><div class="value">${{ "%.0f"|format(cash) }}</div></div>
@@ -157,6 +217,22 @@ HTML = """
                     {{ 'OPEN' if bursa_deschisa else 'CLOSED' }}</div></div>
         </div>
 
+        {% if spark %}
+        <h2>📈 Evolutie Portofoliu ({{ spark.zile|length }} zile)</h2>
+        <div class="chart-box">
+            <svg viewBox="0 0 {{ spark.w }} {{ spark.h }}" style="width:100%;height:160px;">
+                <polyline points="{{ spark.points }}" fill="none"
+                    stroke="{{ '#3fb950' if spark.ultima >= spark.prima else '#f85149' }}" stroke-width="2"/>
+            </svg>
+            <div style="display:flex;justify-content:space-between;color:#8b949e;font-size:12px;margin-top:8px;">
+                <span>{{ spark.zile[0] }}: ${{ "%.0f"|format(spark.prima) }}</span>
+                <span class="{{ 'green' if spark.ultima >= spark.prima else 'red' }}">
+                    {{ spark.zile[-1] }}: ${{ "%.0f"|format(spark.ultima) }}
+                    ({{ "%+.2f"|format((spark.ultima/spark.prima - 1)*100) }}%)</span>
+            </div>
+        </div>
+        {% endif %}
+
         {% if perf and perf.total > 0 %}
         <h2>📊 Performanta R-Multiple ({{ perf.total }} trade-uri inchise)</h2>
         <div class="grid">
@@ -168,28 +244,6 @@ HTML = """
                 <div class="value {{ 'green' if perf.win_rate >= 50 else 'yellow' }}">{{ perf.win_rate }}%</div></div>
             <div class="card"><h3>P&L ($)</h3>
                 <div class="value {{ 'green' if perf.suma_pnl >= 0 else 'red' }}">${{ "%.2f"|format(perf.suma_pnl) }}</div></div>
-            <div class="card"><h3>Best / Worst</h3>
-                <div class="value" style="font-size:15px;">
-                    <span class="green">{{ perf.best.symbol }} {{ "%+.1f"|format(perf.best.R) }}R</span><br>
-                    <span class="red">{{ perf.worst.symbol }} {{ "%+.1f"|format(perf.worst.R) }}R</span></div></div>
-        </div>
-
-        <h2>📈 Distributie R-Multiple</h2>
-        <div class="card">
-            {% set maxc = perf.histograma.values()|max %}
-            {% for label, count in perf.histograma.items() %}
-            <div class="hist-row">
-                <span class="hist-label">{{ label }}</span>
-                <div class="hist-bar" style="width: {{ (count / maxc * 400) if maxc > 0 else 2 }}px;
-                    background: {{ '#3fb950' if '..' in label and not label.startswith('-') and label != '-1..0R' else '#f85149' if label.startswith('<') or label.startswith('-') else '#3fb950' }};"></div>
-                <span class="hist-count">{{ count }}</span>
-            </div>
-            {% endfor %}
-        </div>
-        {% elif perf %}
-        <h2>📊 Performanta R-Multiple</h2>
-        <div class="card" style="text-align:center;color:#8b949e;">
-            {{ perf.mesaj if perf.mesaj else "Niciun trade inchis inca" }}
         </div>
         {% endif %}
 
@@ -213,51 +267,54 @@ HTML = """
         <div class="card" style="text-align:center;color:#8b949e;">Nicio pozitie deschisa</div>
         {% else %}
         <table>
-            <thead><tr><th>Simbol</th><th>Cant.</th><th>Intrare</th><th>Curent</th><th>P&L</th><th>P&L %</th></tr></thead>
+            <thead><tr><th>Simbol</th><th>Sector</th><th>Cant.</th><th>Intrare</th><th>Curent</th><th>P&L %</th><th>Protectie Stop</th></tr></thead>
             <tbody>
                 {% for p in pozitii %}
                 <tr>
                     <td><strong>{{ p.symbol }}</strong></td>
+                    <td><span class="badge">{{ p.sector }}</span></td>
                     <td>{{ p.qty }}</td>
                     <td>${{ "%.2f"|format(p.avg_entry_price) }}</td>
                     <td>${{ "%.2f"|format(p.current_price) }}</td>
-                    <td class="{{ 'green' if p.unrealized_pl >= 0 else 'red' }}">${{ "%.2f"|format(p.unrealized_pl) }}</td>
-                    <td class="{{ 'green' if p.unrealized_plpc >= 0 else 'red' }}">{{ "%+.2f"|format(p.unrealized_plpc * 100) }}%</td>
+                    <td class="{{ 'green' if p.pl_pct >= 0 else 'red' }}">{{ "%+.1f"|format(p.pl_pct) }}%</td>
+                    <td>
+                        {% if p.prag %}
+                        <span class="badge badge-protejat">🛡️ stop la {{ "%.0f"|format(p.stop_efectiv) }}% (prag +{{ "%.0f"|format(p.prag) }}%)</span>
+                        {% else %}
+                        <span class="badge badge-risc">stop la {{ "%.0f"|format(p.stop_efectiv) }}%</span>
+                        {% endif %}
+                    </td>
                 </tr>
                 {% endfor %}
             </tbody>
         </table>
+        {% endif %}
+
+        {% if sectoare %}
+        <h2>🥧 Distributie pe Sectoare</h2>
+        <div class="card">
+            {% set maxval = sectoare.values()|map(attribute='valoare')|max %}
+            {% for sector, d in sectoare.items() %}
+            <div class="sector-row">
+                <span class="sector-label">{{ sector }}</span>
+                <div class="sector-bar" style="width: {{ (d.valoare / maxval * 400) if maxval > 0 else 4 }}px;">
+                    ${{ "%.0f"|format(d.valoare) }}
+                </div>
+                <span class="gray" style="font-size:12px;">{{ d.count }} poz.</span>
+            </div>
+            {% endfor %}
+        </div>
         {% endif %}
 
         {% if selectie %}
-        <h2>🎯 Selectie Diversificata (max 2/sector)</h2>
+        <h2>🎯 Ultima Selectie Diversificata</h2>
         <table>
-            <thead><tr><th>Simbol</th><th>Sector</th><th>Putere (% peste MA50)</th></tr></thead>
+            <thead><tr><th>Simbol</th><th>Sector</th><th>Putere</th></tr></thead>
             <tbody>
                 {% for s in selectie %}
-                <tr>
-                    <td><strong>{{ s.symbol }}</strong> <span class="badge badge-sel">ALES</span></td>
+                <tr><td><strong>{{ s.symbol }}</strong></td>
                     <td><span class="badge">{{ s.sector }}</span></td>
-                    <td class="green">+{{ "%.1f"|format(s.putere) }}%</td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-        {% endif %}
-
-        {% if candidati %}
-        <h2>📈 Top Candidati Bullish (dupa putere semnal)</h2>
-        <table>
-            <thead><tr><th>Simbol</th><th>Sector</th><th>Pret</th><th>Putere</th><th></th></tr></thead>
-            <tbody>
-                {% for c in candidati %}
-                <tr>
-                    <td><strong>{{ c.symbol }}</strong></td>
-                    <td><span class="badge">{{ c.sector }}</span></td>
-                    <td>${{ "%.2f"|format(c.pret) }}</td>
-                    <td class="green">+{{ "%.1f"|format(c.putere) }}%</td>
-                    <td><span class="bar-bg"><span class="bar-fill" style="width: {{ [c.putere * 2, 100]|min }}px"></span></span></td>
-                </tr>
+                    <td class="green">+{{ "%.1f"|format(s.putere) }}%</td></tr>
                 {% endfor %}
             </tbody>
         </table>
@@ -292,18 +349,30 @@ def dashboard():
     except:
         bursa_deschisa = False
 
+    reguli = incarca_reguli()
+    stop_loss_pct = reguli.get("exit", {}).get("stop_loss_pct", 8)
+    pt_cfg = reguli.get("exit", {}).get("profit_taking", {"activ": False})
+
     pozitii = []
+    sectoare = {}
     for p in get_positions():
         try:
+            pl_pct = float(p["unrealized_plpc"]) * 100
+            stop_ef, prag = stop_efectiv_pct(pl_pct, stop_loss_pct, pt_cfg)
+            sector = SECTOARE.get(p["symbol"], "altul")
+            mv = float(p["market_value"])
             pozitii.append({
-                "symbol": p["symbol"], "qty": int(p["qty"]),
+                "symbol": p["symbol"], "sector": sector, "qty": int(p["qty"]),
                 "avg_entry_price": float(p["avg_entry_price"]),
                 "current_price": float(p["current_price"]),
-                "unrealized_pl": float(p["unrealized_pl"]),
-                "unrealized_plpc": float(p["unrealized_plpc"]),
+                "pl_pct": pl_pct, "stop_efectiv": stop_ef, "prag": prag,
             })
+            sectoare.setdefault(sector, {"valoare": 0, "count": 0})
+            sectoare[sector]["valoare"] += mv
+            sectoare[sector]["count"] += 1
         except:
             pass
+    sectoare = dict(sorted(sectoare.items(), key=lambda x: x[1]["valoare"], reverse=True))
 
     zile = lista_jurnale()
     zi_curenta = request.args.get("zi", zile[0] if zile else None)
@@ -311,18 +380,19 @@ def dashboard():
 
     ultim = citeste_jurnal(zile[0]) if zile else None
     rezumat = parse_rezumat(ultim)
-    candidati = parse_candidati(ultim)
     selectie = parse_selectie(ultim)
 
     try:
         perf = compute_perf.calculeaza_R()
-    except Exception:
+    except:
         perf = None
+
+    spark = sparkline_points(incarca_istoric())
 
     return render_template_string(
         HTML, cash=cash, portofoliu=portofoliu, pl_total=pl_total,
-        pozitii=pozitii, bursa_deschisa=bursa_deschisa,
-        rezumat=rezumat, candidati=candidati, selectie=selectie, perf=perf,
+        pozitii=pozitii, sectoare=sectoare, bursa_deschisa=bursa_deschisa,
+        rezumat=rezumat, selectie=selectie, perf=perf, spark=spark,
         zile=zile, zi_curenta=zi_curenta, jurnal_continut=jurnal_continut,
         now=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     )

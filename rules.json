@@ -2,37 +2,44 @@
   "strategy_name": "MA Trend Long Diversificat",
   "direction": "long_only",
   "description": "Cumpara actiuni cu pret > MA20 > MA50, sortate dupa putere semnal, diversificate pe sectoare",
-
   "universe_filters": {
     "min_price_usd": 3.0
   },
-
   "entry_filters": {
     "trend_rule": "price_above_ma20_above_ma50",
     "ma_short": 20,
     "ma_long": 50,
     "min_putere_pct": 0.0
   },
-
   "selection": {
     "sort_by": "putere_peste_ma50",
     "max_per_sector": 2,
     "max_pozitii_noi": 5
   },
-
   "exit": {
     "stop_loss_pct": 8.0,
     "trend_reversal_exit": true,
-    "trend_reversal_rule": "ma20_below_ma50"
+    "trend_reversal_rule": "ma20_below_ma50",
+    "profit_taking": {
+      "activ": true,
+      "praguri": [
+        {
+          "profit_pct": 10.0,
+          "muta_stop_la_pct": 0.0
+        },
+        {
+          "profit_pct": 20.0,
+          "muta_stop_la_pct": 10.0
+        }
+      ]
+    }
   },
-
   "risk": {
     "max_pozitie_pct": 5.0,
     "rezerva_cash_pct": 20.0,
     "expunere_max_pct": 80.0,
     "limit_order_marja_pct": 0.2
   },
-
   "market_regime": {
     "stai_deoparte_daca_bearish_majoritate": true,
     "prag_bearish_pct": 50.0
