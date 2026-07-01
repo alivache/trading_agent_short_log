@@ -21,7 +21,7 @@
     "trend_reversal_exit": true,
     "trend_reversal_rule": "ma20_below_ma50",
     "profit_taking": {
-      "activ": true,
+      "activ": false,
       "praguri": [
         {
           "profit_pct": 10.0,
@@ -31,7 +31,17 @@
           "profit_pct": 20.0,
           "muta_stop_la_pct": 10.0
         }
-      ]
+      ],
+      "vanzare_partiala": {
+        "activ": true,
+        "prag_profit_pct": 10.0,
+        "fractiune_vanduta": 0.5
+      }
+    },
+    "trailing_continuu": {
+      "activ": true,
+      "prag_activare_pct": 5.0,
+      "distanta_trailing_pct": 5.0
     }
   },
   "risk": {

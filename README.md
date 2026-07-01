@@ -1,8 +1,8 @@
 # Trading Agent V2
 
-Agent de tranzactionare in Python pur, inspirat din arhitectura MindStudio + HumbledTrader.
-Ruleaza pe Google Cloud VM. Cont paper Alpaca. Strategie: MA20/MA50 trend, LONG only,
-cu selectie pe putere de semnal si diversificare pe sectoare.
+Agent de tranzactionare in Python pur pe Google Cloud VM. Cont paper Alpaca.
+Strategie: MA20/MA50 trend, LONG only, cu selectie pe putere de semnal,
+diversificare pe sectoare, vanzare partiala si trailing stop continuu.
 
 ## Structura
 
@@ -10,134 +10,94 @@ cu selectie pe putere de semnal si diversificare pe sectoare.
 trading-agent-v2/
 ├── rules.json          # TOATE regulile strategiei (editezi aici, nu codul)
 ├── watchlist.json      # ~120 actiuni lichide
-├── agent.py            # Scriptul principal (research → decizie → trade → jurnal)
-├── compute_perf.py     # Calcul performanta R-multiple din trades.csv
+├── agent.py            # Scriptul principal
+├── compute_perf.py     # Calcul performanta R-multiple
 ├── dashboard.py        # Dashboard web Flask (port 8081)
-├── trades.csv          # Istoric trade-uri (generat automat, pt R-multiple)
-├── .env                # Chei API + config (APCA_*)
+├── reduce_pozitii.py   # Script de urgenta: reduce la max pozitii
+├── trades.csv          # Istoric trade-uri (auto)
+├── istoric_portofoliu.csv    # Valoare zilnica (auto, pt grafic)
+├── vanzari_partiale.json     # Marcaje vanzari partiale (auto)
+├── protectii_stop.json       # Maxime profit per pozitie, pt trailing (auto)
+├── .env                # Chei API (APCA_*)
 ├── journal/            # Jurnale zilnice (YYYY-MM-DD.md)
 └── scripts/
-    ├── research.py     # Date yfinance (bulk) + cont/pozitii Alpaca
-    └── trade.py        # Plaseaza ordine + validare risc
+    ├── research.py     # Date yfinance (bulk + high real) + Alpaca
+    └── trade.py        # Ordine + validare risc
 ```
 
 ## Strategie (in rules.json)
 
-- **Intrare**: pret > MA20 > MA50 (trend ascendent confirmat)
-- **Selectie**: sortare dupa putere semnal (% peste MA50), max 2/sector, max 5 pozitii
-- **Iesire**: stop loss 8%, sau inversare trend (MA20 < MA50)
-- **Regim piata**: daca >50% din actiuni sunt bearish → STAU DEOPARTE
-- **Risc**: max 5% per pozitie, 20% rezerva cash, 80% expunere maxima, limit orders
+- **Intrare**: pret > MA20 > MA50, sortare dupa putere semnal (% peste MA50)
+- **Selectie**: max 2/sector, max 5 pozitii TOTAL (tine cont de cele existente)
+- **Iesire pe 2 nivele**:
+  1. **Vanzare partiala**: la +10% profit, vinde jumatate (o data)
+  2. **Trailing continuu**: stop = (max profit real atins) - 5%, urmareste high-ul real din yfinance
+- **Stop loss baza**: -8% (cat nu s-a activat trailing-ul)
+- **Regim piata**: daca >50% bearish → STAU DEOPARTE
+- **Risc**: max 5%/pozitie, 20% rezerva cash, limit orders
 
-## Initializare pe VM
+## Cum schimbi strategia (rules.json)
 
-```bash
-mkdir -p ~/trading-agent-v2/scripts ~/trading-agent-v2/journal
-cd ~/trading-agent-v2
-# Copiaza fisierele (vezi continutul din chat)
+| Vrei sa... | Schimbi in rules.json |
+|---|---|
+| Stop loss mai strans | exit.stop_loss_pct |
+| Trailing mai larg (chips volatili) | exit.trailing_continuu.distanta_trailing_pct: 8.0 |
+| Prag vanzare partiala | exit.profit_taking.vanzare_partiala.prag_profit_pct |
+| Max actiuni/sector | selection.max_per_sector |
+| Numar pozitii | selection.max_pozitii_noi |
 
-# .env cu chei (prefix APCA_, nu ALPACA_)
-cat > .env << 'EOF'
-APCA_API_KEY_ID=cheia_ta
-APCA_API_SECRET_KEY=secretul_tau
-APCA_BASE_URL=https://paper-api.alpaca.markets
-PORTFOLIO_VALUE_USD=100000
-EOF
+## Cum functioneaza iesirile (exemplu MU)
 
-# Dependinte
-~/trading/venv/bin/pip install requests python-dotenv yfinance pandas flask
+1. MU urca la +10% → vinde jumatate (incasezi profit), marcheaza ca partiala
+2. Restul: trailing la 5% sub max real. MU atinge +26% → stop la +21%
+3. MU cade sub +21% → vinde restul, prinzi profitul aproape de varf
 
-# Test
-~/trading/venv/bin/python3 scripts/research.py account
-~/trading/venv/bin/python3 agent.py
-```
+Trailing-ul foloseste HIGH-ul real din yfinance (nu doar profitul la momentul rularii),
+deci prinde varfurile intraday chiar daca agentul n-a rulat fix atunci.
 
 ## Comenzi utile
 
 ```bash
-# Ruleaza o sesiune completa
-~/trading/venv/bin/python3 agent.py
-
-# Vezi jurnalul de azi
-cat ~/trading-agent-v2/journal/$(date +%Y-%m-%d).md
-
-# Performanta R-multiple
-~/trading/venv/bin/python3 compute_perf.py
-
-# Analiza un simbol (test)
-~/trading/venv/bin/python3 scripts/research.py analiza AAPL
-
-# Status piata
-~/trading/venv/bin/python3 scripts/trade.py status
-
-# Pozitii deschise
-~/trading/venv/bin/python3 scripts/research.py positions
+~/trading/venv/bin/python3 agent.py                    # sesiune completa
+~/trading/venv/bin/python3 agent.py --management        # doar management, fara intrari
+~/trading/venv/bin/python3 compute_perf.py             # performanta R
+~/trading/venv/bin/python3 reduce_pozitii.py           # reduce la max pozitii
+cat journal/$(date +%Y-%m-%d).md                       # jurnal azi
 ```
 
-## Cum schimbi strategia (rules.json)
+## Dashboard (port 8081)
 
-Editezi `rules.json` fara sa atingi codul. Exemple:
+http://mini-trading.duckdns.org:8081
 
-| Vrei sa... | Schimbi in rules.json |
-|---|---|
-| Stop loss mai strans (6%) | `exit.stop_loss_pct: 6.0` |
-| Max 3 actiuni per sector | `selection.max_per_sector: 3` |
-| Mai multe pozitii (8) | `selection.max_pozitii_noi: 8` |
-| Pozitii mai mari (8%) | `risk.max_pozitie_pct: 8.0` |
-| Prag bearish mai sus (60%) | `market_regime.prag_bearish_pct: 60.0` |
-| Doar semnale puternice (>5%) | `entry_filters.min_putere_pct: 5.0` |
+Contine: carduri portofoliu, grafic evolutie, R-multiple + histograma,
+sentiment piata (bullish/bearish din 120), pozitii cu stop trailing vizibil,
+distributie pe sectoare, tranzactii pe zi cu P&L, selector jurnale.
 
-Dupa orice modificare, ruleaza agent.py — citeste automat noile valori.
-
-## R-Multiple (metrica de performanta)
-
-R = cat ai castigat raportat la cat ai riscat pe acel trade.
-- R = (pret_iesire - pret_intrare) / (pret_intrare - stop_price)
-- +2R = ai castigat dublul riscului. -1R = ai pierdut exact cat riscai (stop loss).
-
-**De ce conteaza**: R mediu pozitiv = strategia are edge real, independent de marimea pozitiilor.
-R mediu negativ = pierzi pe termen lung, oricat de mare ar fi win rate-ul.
-
-Dashboard-ul (port 8081) arata: suma R, R mediu/trade, win rate, best/worst, histograma R.
-
-## Dashboard
-
-```bash
-# Manual
-~/trading/venv/bin/python3 dashboard.py
-
-# Sau ca serviciu
-sudo systemctl restart dashboard-v2.service
-```
-
-Acceseaza: http://mini-trading.duckdns.org:8081
-(necesita firewall TCP:8081 deschis in Google Cloud Console)
-
-Contine: carduri portofoliu, performanta R-multiple + histograma, sentiment piata
-(bullish/bearish/lateral din 120), pozitii deschise, selectie diversificata,
-top candidati bullish, selector jurnale.
-
-## Rulare automata (cron, 3x/zi ca in articol)
+## Cron (2 rulari: 1 completa + management)
 
 ```cron
-45 9 * * 1-5 cd /home/liviu_anton/trading-agent-v2 && /home/liviu_anton/trading/venv/bin/python3 agent.py >> /home/liviu_anton/trading-agent-v2/agent.log 2>&1
-0 10 * * 1-5 cd /home/liviu_anton/trading-agent-v2 && /home/liviu_anton/trading/venv/bin/python3 agent.py >> /home/liviu_anton/trading-agent-v2/agent.log 2>&1
-15 16 * * 1-5 cd /home/liviu_anton/trading-agent-v2 && /home/liviu_anton/trading/venv/bin/python3 agent.py >> /home/liviu_anton/trading-agent-v2/agent.log 2>&1
+0 10 * * 1-5 cd ~/trading-agent-v2 && ~/trading/venv/bin/python3 agent.py >> agent.log 2>&1
+0 13 * * 1-5 cd ~/trading-agent-v2 && ~/trading/venv/bin/python3 agent.py --management >> agent.log 2>&1
+15 16 * * 1-5 cd ~/trading-agent-v2 && ~/trading/venv/bin/python3 agent.py --management >> agent.log 2>&1
 ```
 
-IMPORTANT: `cd` la inceput e esential (load_dotenv cauta .env in directorul curent).
+## R-Multiple
+
+R = (pret_iesire - pret_intrare) / (pret_intrare - stop_price)
+R mediu pozitiv = strategia are edge. Ai nevoie de 20-30 trade-uri pentru relevanta.
 
 ## ATENTIE
 
-- Acelasi cont Alpaca ca multi_tf → daca ruleaza ambele, pozitiile se amesteca.
-  Pentru testare curata v2, opreste multi_tf: `sudo systemctl stop trading.service`
-- LONG-only — NU profita din piata in scadere, doar sta deoparte
-- Cont PAPER (bani virtuali) — nu trece la bani reali fara luni de validare
-- yfinance poate da rate-limit; descarcarea in bloc (analizeaza_toate) minimizeaza riscul
+- Acelasi cont Alpaca ca multi_tf → opreste multi_tf cand rulezi v2
+- LONG-only, cont PAPER (bani virtuali)
+- Trailing 5% poate fi strans pentru chips volatili — considera 7-8%
 
-## Istoric modificari
+## Istoric versiuni
 
-- v1: 5 actiuni, analiza individuala, jurnal simplu
-- v2.1: watchlist 120 actiuni, descarcare in bloc (analizeaza_toate)
-- v2.2: selectie pe putere semnal + diversificare pe sectoare (max 2/sector)
-- v2.3: reguli centralizate in rules.json + R-multiple tracking (trades.csv + compute_perf.py + dashboard)
+- v1: 5 actiuni
+- v2.1: watchlist 120 + descarcare bulk
+- v2.2: selectie pe putere + diversificare sectoare
+- v2.3: rules.json + R-multiple
+- v2.4: stiri Nivel 1 + dashboard imbunatatit
+- v2.5: vanzare partiala la +10%
+- v2.6: trailing continuu pe high real + fix bug 14 pozitii + fix afisare dashboard

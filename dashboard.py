@@ -74,14 +74,23 @@ def incarca_reguli():
         return {}
 
 
-def stop_efectiv_pct(pl_pct, stop_loss_pct, pt_cfg):
+def stop_efectiv_pct(pl_pct, stop_loss_pct, pt_cfg, simbol=None, maxime=None):
+    """Calculeaza stop-ul efectiv folosind trailing continuu (max real - distanta)."""
     stop = -stop_loss_pct
     prag = None
-    if pt_cfg.get("activ"):
-        for p in pt_cfg.get("praguri", []):
-            if pl_pct >= p["profit_pct"] and p["muta_stop_la_pct"] > stop:
-                stop = p["muta_stop_la_pct"]
-                prag = p["profit_pct"]
+    try:
+        with open(RULES_FILE) as f:
+            reg = json.load(f)
+        tc = reg["exit"].get("trailing_continuu", {})
+    except Exception:
+        tc = {}
+    if tc.get("activ") and simbol and maxime:
+        max_atins = maxime.get(simbol, pl_pct)
+        if max_atins >= tc.get("prag_activare_pct", 5):
+            stop_trailing = max_atins - tc.get("distanta_trailing_pct", 5)
+            if stop_trailing > stop:
+                stop = stop_trailing
+                prag = max_atins
     return stop, prag
 
 
@@ -96,6 +105,54 @@ def incarca_istoric():
             except:
                 pass
     return randuri
+
+
+def tranzactii_zi(zi):
+    """Citeste tranzactiile dintr-o zi, cu P&L atasat la vanzari."""
+    if not zi or not os.path.exists(TRADES_CSV):
+        return []
+
+    # Calculeaza P&L per vanzare (FIFO) din tot istoricul
+    pnl_per_vanzare = {}  # (symbol, exit_price_rotunjit) -> {pnl, pct}
+    try:
+        rez = compute_perf.calculeaza_R()
+        for pereche in rez.get("perechi", []):
+            cheie = (pereche["symbol"], round(pereche["exit"], 2))
+            pct = (pereche["exit"] / pereche["entry"] - 1) * 100 if pereche["entry"] else 0
+            pnl_per_vanzare[cheie] = {"pnl": pereche["pnl"], "pct": pct, "R": pereche["R"]}
+    except Exception:
+        pass
+
+    tranzactii = []
+    try:
+        with open(TRADES_CSV, encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                ts = row.get("timestamp", "")
+                if ts[:10] == zi:
+                    side = row.get("side", "")
+                    symbol = row.get("symbol", "")
+                    pret = row.get("entry_price", "")
+                    pnl_info = None
+                    if side == "SELL":
+                        try:
+                            cheie = (symbol, round(float(pret), 2))
+                            pnl_info = pnl_per_vanzare.get(cheie)
+                        except Exception:
+                            pnl_info = None
+                    tranzactii.append({
+                        "ora": ts[11:19] if len(ts) >= 19 else "",
+                        "symbol": symbol,
+                        "side": side,
+                        "qty": row.get("qty", ""),
+                        "pret": pret,
+                        "sector": row.get("sector", ""),
+                        "pnl": pnl_info["pnl"] if pnl_info else None,
+                        "pct": pnl_info["pct"] if pnl_info else None,
+                        "R": pnl_info["R"] if pnl_info else None,
+                    })
+    except Exception:
+        return []
+    return tranzactii
 
 
 def lista_jurnale():
@@ -320,6 +377,46 @@ HTML = """
         </table>
         {% endif %}
 
+        {% if tranzactii %}
+        <h2>💱 Tranzactii in {{ zi_curenta }} ({{ tranzactii|length }})</h2>
+        <table>
+            <thead><tr><th>Ora</th><th>Actiune</th><th>Simbol</th><th>Sector</th><th>Cant.</th><th>Pret</th><th>P&L</th></tr></thead>
+            <tbody>
+                {% for t in tranzactii %}
+                <tr>
+                    <td class="gray">{{ t.ora }}</td>
+                    <td>
+                        {% if t.side == 'BUY' %}
+                        <span class="badge" style="background:#1a3a1f;color:#3fb950;">▲ BUY</span>
+                        {% else %}
+                        <span class="badge" style="background:#3a1a1a;color:#f85149;">▼ SELL</span>
+                        {% endif %}
+                    </td>
+                    <td><strong>{{ t.symbol }}</strong></td>
+                    <td><span class="badge">{{ t.sector }}</span></td>
+                    <td>{{ t.qty }}</td>
+                    <td>${{ t.pret }}</td>
+                    <td>
+                        {% if t.pnl is not none %}
+                        <span class="{{ 'green' if t.pnl >= 0 else 'red' }}">
+                            ${{ "%.2f"|format(t.pnl) }} ({{ "%+.1f"|format(t.pct) }}%)
+                            {% if t.R is not none %}<span class="gray" style="font-size:11px;"> {{ "%+.2f"|format(t.R) }}R</span>{% endif %}
+                        </span>
+                        {% else %}
+                        <span class="gray">—</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        {% if zi_curenta %}
+        <h2>💱 Tranzactii in {{ zi_curenta }}</h2>
+        <div class="card" style="text-align:center;color:#8b949e;">Nicio tranzactie in aceasta zi</div>
+        {% endif %}
+        {% endif %}
+
         <h2>📓 Jurnale</h2>
         <div class="jurnal-box">
             <select class="jurnal-select" onchange="window.location.href='/?zi=' + this.value">
@@ -352,13 +449,21 @@ def dashboard():
     reguli = incarca_reguli()
     stop_loss_pct = reguli.get("exit", {}).get("stop_loss_pct", 8)
     pt_cfg = reguli.get("exit", {}).get("profit_taking", {"activ": False})
+    maxime_stop = {}
+    try:
+        cale_prot = os.path.join(FOLDER, "protectii_stop.json")
+        if os.path.exists(cale_prot):
+            with open(cale_prot) as f:
+                maxime_stop = json.load(f)
+    except Exception:
+        maxime_stop = {}
 
     pozitii = []
     sectoare = {}
     for p in get_positions():
         try:
             pl_pct = float(p["unrealized_plpc"]) * 100
-            stop_ef, prag = stop_efectiv_pct(pl_pct, stop_loss_pct, pt_cfg)
+            stop_ef, prag = stop_efectiv_pct(pl_pct, stop_loss_pct, pt_cfg, p["symbol"], maxime_stop)
             sector = SECTOARE.get(p["symbol"], "altul")
             mv = float(p["market_value"])
             pozitii.append({
@@ -377,6 +482,7 @@ def dashboard():
     zile = lista_jurnale()
     zi_curenta = request.args.get("zi", zile[0] if zile else None)
     jurnal_continut = citeste_jurnal(zi_curenta) if zi_curenta else "Niciun jurnal."
+    tranzactii = tranzactii_zi(zi_curenta)
 
     ultim = citeste_jurnal(zile[0]) if zile else None
     rezumat = parse_rezumat(ultim)
@@ -393,7 +499,7 @@ def dashboard():
         HTML, cash=cash, portofoliu=portofoliu, pl_total=pl_total,
         pozitii=pozitii, sectoare=sectoare, bursa_deschisa=bursa_deschisa,
         rezumat=rezumat, selectie=selectie, perf=perf, spark=spark,
-        zile=zile, zi_curenta=zi_curenta, jurnal_continut=jurnal_continut,
+        zile=zile, zi_curenta=zi_curenta, jurnal_continut=jurnal_continut, tranzactii=tranzactii,
         now=datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     )
 

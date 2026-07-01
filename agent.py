@@ -1,6 +1,6 @@
 # agent.py
 # Agent principal — research → decizie → trade → jurnal
-# Reguli citite din rules.json. Salveaza trade-uri in trades.csv (pt R-multiple).
+# rules.json + R-multiple + vanzare partiala + trailing continuu pe high real + stiri + istoric
 import os
 import json
 import sys
@@ -20,10 +20,8 @@ RULES_FILE = os.path.join(FOLDER, "rules.json")
 JOURNAL_DIR = os.path.join(FOLDER, "journal")
 TRADES_CSV = os.path.join(FOLDER, "trades.csv")
 
-# Portofoliu pentru calcul sizing (din .env, fallback)
 PORTFOLIO_VALUE = float(os.getenv("PORTFOLIO_VALUE_USD", 100000))
 
-# Harta sectoarelor (pentru diversificare)
 SECTOARE = {
     "AAPL": "tech", "MSFT": "tech", "GOOGL": "tech", "AMZN": "tech",
     "META": "tech", "NVDA": "semi", "TSLA": "auto", "AVGO": "semi",
@@ -78,7 +76,6 @@ def scrie_jurnal(continut):
 
 
 def salveaza_trade(simbol, side, qty, pret, stop_price):
-    """Salveaza trade in CSV pentru calcul R-multiple ulterior."""
     exista = os.path.exists(TRADES_CSV)
     with open(TRADES_CSV, "a", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
@@ -91,22 +88,94 @@ def salveaza_trade(simbol, side, qty, pret, stop_price):
 
 
 def salveaza_istoric(valoare, cash, nr_pozitii):
-    """Salveaza valoarea portofoliului zilnic pentru grafic evolutie."""
-    import csv as _csv
     fisier = os.path.join(FOLDER, "istoric_portofoliu.csv")
     zi = datetime.now().strftime("%Y-%m-%d")
     randuri = {}
     if os.path.exists(fisier):
         with open(fisier, encoding="utf-8") as f:
-            for row in _csv.DictReader(f):
+            for row in csv.DictReader(f):
                 randuri[row["zi"]] = row
     randuri[zi] = {"zi": zi, "valoare": round(valoare, 2),
                    "cash": round(cash, 2), "pozitii": nr_pozitii}
     with open(fisier, "w", newline="", encoding="utf-8") as f:
-        w = _csv.DictWriter(f, fieldnames=["zi", "valoare", "cash", "pozitii"])
+        w = csv.DictWriter(f, fieldnames=["zi", "valoare", "cash", "pozitii"])
         w.writeheader()
         for z in sorted(randuri.keys()):
             w.writerow(randuri[z])
+
+
+# ── Vanzare partiala (marcaje) ──
+def incarca_partiale():
+    fisier = os.path.join(FOLDER, "vanzari_partiale.json")
+    if os.path.exists(fisier):
+        try:
+            with open(fisier) as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def marcheaza_partiala(simbol):
+    fisier = os.path.join(FOLDER, "vanzari_partiale.json")
+    date = incarca_partiale()
+    date[simbol] = datetime.now().isoformat()
+    with open(fisier, "w") as f:
+        json.dump(date, f, indent=2)
+
+
+def curata_partiala(simbol):
+    fisier = os.path.join(FOLDER, "vanzari_partiale.json")
+    date = incarca_partiale()
+    if simbol in date:
+        del date[simbol]
+        with open(fisier, "w") as f:
+            json.dump(date, f, indent=2)
+
+
+# ── Trailing continuu (maxime de profit atinse) ──
+def incarca_protectii():
+    fisier = os.path.join(FOLDER, "protectii_stop.json")
+    if os.path.exists(fisier):
+        try:
+            with open(fisier) as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+
+def salveaza_protectie(simbol, nivel):
+    fisier = os.path.join(FOLDER, "protectii_stop.json")
+    date = incarca_protectii()
+    if simbol not in date or nivel > date[simbol]:
+        date[simbol] = nivel
+        with open(fisier, "w") as f:
+            json.dump(date, f, indent=2)
+
+
+def curata_protectie(simbol):
+    fisier = os.path.join(FOLDER, "protectii_stop.json")
+    date = incarca_protectii()
+    if simbol in date:
+        del date[simbol]
+        with open(fisier, "w") as f:
+            json.dump(date, f, indent=2)
+
+
+def data_intrare_pozitie(simbol):
+    """Gaseste data ultimei cumparari (BUY) pentru un simbol din trades.csv."""
+    if not os.path.exists(TRADES_CSV):
+        return None
+    data = None
+    try:
+        with open(TRADES_CSV, encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                if row["symbol"] == simbol and row["side"] == "BUY":
+                    data = row["timestamp"]
+    except Exception:
+        return None
+    return data
 
 
 def ia_stiri(simbol, maxim=2):
@@ -132,9 +201,9 @@ def putere_semnal(a):
         return 0
 
 
-def selecteaza_diversificat(bullish, detinute, max_pozitii, max_sector):
+def selecteaza_diversificat(bullish, detinute, max_pozitii, max_sector, sectoare_detinute=None):
     selectii = []
-    pe_sector = {}
+    pe_sector = dict(sectoare_detinute) if sectoare_detinute else {}
     for a in bullish:
         if len(selectii) >= max_pozitii:
             break
@@ -148,7 +217,7 @@ def selecteaza_diversificat(bullish, detinute, max_pozitii, max_sector):
     return selectii
 
 
-def ruleaza():
+def ruleaza(doar_management=False):
     print("=" * 50)
     print("AGENT TRADING V2 — sesiune completa")
     print("=" * 50)
@@ -168,6 +237,8 @@ def ruleaza():
     min_pret = reguli["universe_filters"]["min_price_usd"]
 
     print(f"Strategie: {reguli['strategy_name']}")
+    if doar_management:
+        print("MOD: doar management (fara intrari noi)")
     print(f"Reguli: SL={stop_loss_pct}% | max {max_pozitii} pozitii | "
           f"max {max_sector}/sector | pozitie {max_pozitie_pct}%")
 
@@ -186,6 +257,14 @@ def ruleaza():
     print(f"Pozitii deschise: {len(pozitii)} | Piata: {'DESCHISA' if piata_deschisa else 'INCHISA'}")
     salveaza_istoric(valoare_totala, cash, len(pozitii))
 
+    # Curata marcajele pentru pozitii care nu mai exista
+    simboluri_active = {p["symbol"] for p in pozitii}
+    for simbol in list(incarca_partiale().keys()):
+        if simbol not in simboluri_active:
+            curata_partiala(simbol)
+            curata_protectie(simbol)
+            print(f"  🧹 Curatat marcaj vechi: {simbol} (nu mai e in portofoliu)")
+
     wl = incarca_watchlist()
     simboluri = [item["symbol"] for item in wl["watchlist"]]
     aloc = {item["symbol"]: item["max_allocation_pct"] for item in wl["watchlist"]}
@@ -202,7 +281,6 @@ def ruleaza():
             erori += 1
 
     valide = [a for a in analize if "eroare" not in a]
-    # Filtru pret minim
     valide = [a for a in valide if a.get("pret", 0) >= min_pret]
     bullish = [a for a in valide if a.get("trend") == "bullish"]
     bearish = [a for a in valide if a.get("trend") == "bearish"]
@@ -221,41 +299,80 @@ def ruleaza():
         for a in bullish[:8]:
             print(f"    {a['symbol']} ({a['sector']}) +{a['putere']:.1f}% peste MA50")
 
-    # Stop loss pe pozitii existente
+    # ── Management pozitii: vanzare partiala + trailing continuu ──
     inchideri = []
     pt_cfg = r_exit.get("profit_taking", {"activ": False})
+    vp_cfg = pt_cfg.get("vanzare_partiala", {"activ": False})
+    tc_cfg = r_exit.get("trailing_continuu", {"activ": False})
+    partiale = incarca_partiale()
+
     for p in pozitii:
         try:
             pl_pct = float(p.get("unrealized_plpc", 0)) * 100
+            qty_total = int(p["qty"])
+            pret_intrare = float(p["avg_entry_price"])
+
+            # VANZARE PARTIALA la prag (o singura data)
+            if (vp_cfg.get("activ") and piata_deschisa
+                    and p["symbol"] not in partiale
+                    and pl_pct >= vp_cfg["prag_profit_pct"]):
+                qty_vand = int(qty_total * vp_cfg["fractiune_vanduta"])
+                if qty_vand >= 1:
+                    pret_p = float(p["current_price"])
+                    limit_p = round(pret_p * (1 - limit_marja), 2)
+                    trade.place_order(p["symbol"], qty_vand, "sell", limit_p)
+                    salveaza_trade(p["symbol"], "SELL", qty_vand, pret_p, 0)
+                    marcheaza_partiala(p["symbol"])
+                    inchideri.append(f"{p['symbol']} — VANZARE PARTIALA {qty_vand}/{qty_total} la +{pl_pct:.1f}%")
+                    print(f"  💰 PARTIAL {p['symbol']}: vandut {qty_vand}/{qty_total} la +{pl_pct:.1f}% (las restul sa curga)")
+
+            # TRAILING CONTINUU pe HIGH real: stop = (max profit real) - distanta
             stop_efectiv = -stop_loss_pct
             prag_atins = None
-            if pt_cfg.get("activ"):
-                for prag in pt_cfg["praguri"]:
-                    if pl_pct >= prag["profit_pct"]:
-                        if prag["muta_stop_la_pct"] > stop_efectiv:
-                            stop_efectiv = prag["muta_stop_la_pct"]
-                            prag_atins = prag["profit_pct"]
+            maxime = incarca_protectii()
+            max_atins = maxime.get(p["symbol"], pl_pct)
+            # High real din yfinance (max profit intraday atins de la intrare)
+            try:
+                data_int = data_intrare_pozitie(p["symbol"])
+                if data_int:
+                    high_max = research.high_maxim_de_la(p["symbol"], data_int)
+                    if high_max and pret_intrare > 0:
+                        pl_max_real = (high_max - pret_intrare) / pret_intrare * 100
+                        if pl_max_real > max_atins:
+                            max_atins = pl_max_real
+            except Exception:
+                pass
+            if pl_pct > max_atins:
+                max_atins = pl_pct
+            salveaza_protectie(p["symbol"], round(max_atins, 2))
+            if tc_cfg.get("activ") and max_atins >= tc_cfg["prag_activare_pct"]:
+                stop_trailing = max_atins - tc_cfg["distanta_trailing_pct"]
+                if stop_trailing > stop_efectiv:
+                    stop_efectiv = stop_trailing
+                    prag_atins = max_atins
+
+            # Verifica iesire (stop loss sau trailing)
             iesire = pl_pct <= stop_efectiv
             if iesire:
                 if piata_deschisa:
-                    pret = float(p["current_price"])
-                    limit = round(pret * (1 - limit_marja), 2)
-                    trade.place_order(p["symbol"], p["qty"], "sell", limit)
-                    salveaza_trade(p["symbol"], "SELL", p["qty"], pret, 0)
+                    pret_p = float(p["current_price"])
+                    limit_p = round(pret_p * (1 - limit_marja), 2)
+                    trade.place_order(p["symbol"], p["qty"], "sell", limit_p)
+                    salveaza_trade(p["symbol"], "SELL", p["qty"], pret_p, 0)
                     if prag_atins is not None:
-                        motiv = f"PROFIT-TAKING (stop urcat la {stop_efectiv:.0f}% dupa +{prag_atins:.0f}%)"
+                        motiv = f"TRAILING STOP (iesit la +{pl_pct:.1f}%, max atins +{prag_atins:.1f}%)"
                     else:
                         motiv = f"STOP LOSS ({pl_pct:.1f}%)"
                     inchideri.append(f"{p['symbol']} — {motiv}")
-                    print(f"  🔴 INCHIS {p['symbol']}: {motiv} | P&L acum {pl_pct:.1f}%")
+                    print(f"  🔴 INCHIS {p['symbol']}: {motiv}")
                 else:
                     print(f"  {p['symbol']} sub stop efectiv ({stop_efectiv:.0f}%) — astept deschiderea")
-            elif pt_cfg.get("activ") and prag_atins is not None:
-                print(f"  🛡️  {p['symbol']} +{pl_pct:.1f}% — stop protejat la {stop_efectiv:.0f}% (prag +{prag_atins:.0f}% atins)")
+            elif prag_atins is not None:
+                print(f"  🛡️  {p['symbol']} +{pl_pct:.1f}% (max +{prag_atins:.1f}%) — stop trailing la +{stop_efectiv:.1f}%")
         except Exception as e:
             print(f"  Eroare verificare {p.get('symbol')}: {e}")
 
-    # Regim de piata
+    # ── Regim piata + intrari ──
     prag = r_regime["prag_bearish_pct"] / 100
     piata_in_scadere = (r_regime["stai_deoparte_daca_bearish_majoritate"]
                         and valide and len(bearish) > len(valide) * prag)
@@ -266,33 +383,50 @@ def ruleaza():
 
     if piata_in_scadere:
         print(f"\n⚠️  Piata in scadere ({len(bearish)} bearish din {len(valide)}) — STAU DEOPARTE")
+    elif doar_management:
+        print("\n🔧 Mod management — fara intrari noi")
     elif not piata_deschisa:
-        selectii = selecteaza_diversificat(bullish, detinute, max_pozitii, max_sector)
+        sectoare_det = {}
+        for p in pozitii:
+            sec = SECTOARE.get(p["symbol"], "altul")
+            sectoare_det[sec] = sectoare_det.get(sec, 0) + 1
+        locuri_libere = max(0, max_pozitii - len(pozitii))
+        if locuri_libere > 0:
+            selectii = selecteaza_diversificat(bullish, detinute, locuri_libere, max_sector, sectoare_det)
         print("\n🌙 Piata inchisa — analiza pregatita, fara ordine")
         if selectii:
             print(f"  La deschidere as cumpara: {', '.join(s['symbol'] for s in selectii)}")
     else:
-        print(f"\nCaut intrari (max {max_pozitii}, max {max_sector}/sector)...")
-        selectii = selecteaza_diversificat(bullish, detinute, max_pozitii, max_sector)
-        for a in selectii:
-            max_alocare = min(max_pozitie_pct, a["max_allocation_pct"])
-            suma = valoare_totala * max_alocare / 100
-            pret = a["pret"]
-            qty = int(suma / pret)
-            if qty < 1:
-                continue
-            valid, motiv = trade.validate_order(a["symbol"], qty, pret, valoare_totala, pozitii)
-            if not valid:
-                print(f"  {a['symbol']}: respins — {motiv}")
-                continue
-            limit = round(pret * (1 + limit_marja), 2)
-            stop_price = pret * (1 - stop_loss_pct / 100)
-            trade.place_order(a["symbol"], qty, "buy", limit)
-            salveaza_trade(a["symbol"], "BUY", qty, limit, stop_price)
-            trade_uri.append(f"{a['symbol']} ({a['sector']}) BUY {qty} @ ${limit}")
-            print(f"  ✅ {a['symbol']} ({a['sector']}) BUY {qty} @ ${limit} | +{a['putere']:.1f}% peste MA50")
+        locuri_libere = max(0, max_pozitii - len(pozitii))
+        if locuri_libere == 0:
+            print(f"\n📊 Ai deja {len(pozitii)}/{max_pozitii} pozitii — nu mai cumpar (portofoliu plin)")
+            selectii = []
+        else:
+            sectoare_det = {}
+            for p in pozitii:
+                sec = SECTOARE.get(p["symbol"], "altul")
+                sectoare_det[sec] = sectoare_det.get(sec, 0) + 1
+            print(f"\nCaut intrari (max {locuri_libere} locuri libere, max {max_sector}/sector)...")
+            selectii = selecteaza_diversificat(bullish, detinute, locuri_libere, max_sector, sectoare_det)
+            for a in selectii:
+                max_alocare = min(max_pozitie_pct, a["max_allocation_pct"])
+                suma = valoare_totala * max_alocare / 100
+                pret = a["pret"]
+                qty = int(suma / pret)
+                if qty < 1:
+                    continue
+                valid, motiv = trade.validate_order(a["symbol"], qty, pret, valoare_totala, pozitii)
+                if not valid:
+                    print(f"  {a['symbol']}: respins — {motiv}")
+                    continue
+                limit = round(pret * (1 + limit_marja), 2)
+                stop_price = pret * (1 - stop_loss_pct / 100)
+                trade.place_order(a["symbol"], qty, "buy", limit)
+                salveaza_trade(a["symbol"], "BUY", qty, limit, stop_price)
+                trade_uri.append(f"{a['symbol']} ({a['sector']}) BUY {qty} @ ${limit}")
+                print(f"  ✅ {a['symbol']} ({a['sector']}) BUY {qty} @ ${limit} | +{a['putere']:.1f}% peste MA50")
 
-    # Nivel 1: ia stiri pentru selectia finala (pune in jurnal)
+    # Stiri Nivel 1 pentru selectie
     stiri_selectie = {}
     if selectii:
         print("\n📰 Iau stiri pentru selectie...")
@@ -365,8 +499,8 @@ def genereaza_jurnal(zi, cash, valoare, pozitii, valide, bullish, bearish,
         linii.append("Niciun trade nou azi.")
     linii.append("")
 
-    linii.append("## Pozitii Inchise")
-    linii.append(", ".join(inchideri) if inchideri else "Niciuna azi.")
+    linii.append("## Pozitii Inchise / Modificate")
+    linii.append("\n".join(f"- {i}" for i in inchideri) if inchideri else "Niciuna azi.")
     linii.append("")
 
     linii.append("## Reflectie")
@@ -389,4 +523,6 @@ def genereaza_jurnal(zi, cash, valoare, pozitii, valide, bullish, bearish,
 
 
 if __name__ == "__main__":
-    ruleaza()
+    import sys
+    mod_mgmt = "--management" in sys.argv
+    ruleaza(doar_management=mod_mgmt)
